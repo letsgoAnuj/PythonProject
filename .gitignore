@@ -1,0 +1,20 @@
+# Security / Credentials
+.env
+
+# Virtual Environments
+.venv/
+venv/
+env/
+
+# Data & Outputs (Keeps repo lightweight)
+polymer_data/
+analysis_output/
+*.log
+
+# Python Cache
+__pycache__/
+*.pyc
+
+# IDE folders
+.idea/
+.vscode/
