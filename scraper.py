@@ -717,7 +717,22 @@ if __name__ == "__main__":
             "partial_match": True,
             "text": "BOPP CIF South Korea",
             "period": "365"
+        },
+        "LDPE": {
+            "url": "https://www.polymerupdate.com/Prices/SouthAsia/OpenMarket/India/Delhi",
+            "guid": None,
+            "partial_match": True,
+            "text": "LDPE Film",
+            "period": "365"
+        },
+        "LLDPE": {
+            "url": "https://www.polymerupdate.com/Prices/SouthAsia/OpenMarket/India/Delhi",
+            "guid": None,
+            "partial_match": True,
+            "text": "LLDPE Film",
+            "period": "365"
         }
+
     }
 
     # HTML Table Scraping URLs

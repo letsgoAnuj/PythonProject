@@ -181,6 +181,7 @@ tabs = st.tabs([
     "💱 Exchange Rates (USD/EUR/RMB)",
     "🧵 Yarn Impact (PTA, MEG, PP, Brent)",
     "🧪 PVC Coated (DOP, Suspension)",
+    "📦 Packaging Films",
     "🧽 Precursors (EVA, Acetone, Naphtha)",
     "⚙️ Soles & Hardware (Brass, Latex, Zinc)",
     "📄 Master Audit Trail"
@@ -256,9 +257,27 @@ with tabs[2]:
     st.plotly_chart(build_trend_chart([{"prod": "DOP"}, {"prod": "PVC_Suspension"}], df), use_container_width=True)
 
 # ------------------------------------------
-# TAB 4: PRECURSORS (EVA, ACETONE, NAPHTHA) (PAGE 4)
+# NEW TAB 4: PACKAGING FILMS (LDPE & LLDPE)
 # ------------------------------------------
+
 with tabs[3]:
+    st.subheader("Packaging Films: LDPE & LLDPE")
+    st.markdown("""
+        <div class="executive-box">
+            <h4>Source: PolymerUpdate</h4>
+            <p>Tracking Low-Density and Linear Low-Density Polyethylene. These commodities dictate the baseline costs for flexible packaging, protective films, and shrink wraps.</p>
+        </div>
+    """, unsafe_allow_html=True)
+
+    display_kpis(["LDPE", "LLDPE"], df)
+    st.markdown("###")
+
+    st.plotly_chart(build_trend_chart([{"prod": "LDPE"}, {"prod": "LLDPE"}], df), use_container_width=True)
+
+# ------------------------------------------
+# TAB 5: PRECURSORS (EVA, ACETONE, NAPHTHA) (PAGE 4)
+# ------------------------------------------
+with tabs[4]:
     st.subheader("EVA, Acetone & Naphtha: Market Trend")
     st.markdown("""
         <div class="executive-box">
@@ -282,9 +301,9 @@ with tabs[3]:
         st.plotly_chart(build_trend_chart([{"prod": "EVA"}], df), use_container_width=True)
 
 # ------------------------------------------
-# TAB 5: SOLES & HARDWARE (BRASS, LATEX, ZINC) (PAGE 5)
+# TAB 6: SOLES & HARDWARE (BRASS, LATEX, ZINC) (PAGE 5)
 # ------------------------------------------
-with tabs[4]:
+with tabs[5]:
     st.subheader("Brass, Latex & Zinc: Market Trend")
     st.markdown("""
         <div class="executive-box">
@@ -308,9 +327,9 @@ with tabs[4]:
         st.plotly_chart(build_trend_chart([{"prod": "ZINC"}], df), use_container_width=True)
 
 # ------------------------------------------
-# TAB 6: AUDIT TRAIL & EXPORT
+# TAB 7: AUDIT TRAIL & EXPORT
 # ------------------------------------------
-with tabs[5]:
+with tabs[6]:
     st.subheader("Data Audit Trail & Conversion Formulas")
     st.markdown("Full transparency on raw inputs, currency conversions, and calculation formulas.")
 

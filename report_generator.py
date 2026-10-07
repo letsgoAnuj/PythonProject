@@ -67,6 +67,14 @@ PAGES_CONFIG = [
         ]
     },
     {
+        "title": "Packaging & Films: LDPE & LLDPE",
+        "insight": "FORECAST: Tracking Low-Density and Linear Low-Density Polyethylene. These commodities drive the baseline costs for flexible packaging films and protective wraps.",
+        "charts": [
+            {"title": "LDPE & LLDPE Trajectory", "products": ["LDPE", "LLDPE"], "sheet": "Product_Trends",
+             "price_col": "Final_INR_KG_Price", "unit": "INR/KG"}
+        ]
+    },
+    {
         "title": "Raw Precursors: Naphtha & Acetone",
         "insight": "FORECAST: Naphtha and Acetone act as primary precursors. Spikes in these upstream commodities will cascade into PU foam and EVA sheet cost increases.",
         "charts": [

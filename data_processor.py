@@ -282,7 +282,7 @@ def run_data_pipeline():
                 df_clean = process_westmetall_metals(filepath, name, usd_inr_df)
             elif name == "Brent":
                 df_clean = process_brent_crude(filepath, usd_inr_df)
-            elif name in ["EVA", "EVA_PVC", "PVC_Suspension", "ACETONE", "PVC"]:
+            elif name in ["EVA", "EVA_PVC", "PVC_Suspension", "ACETONE", "PVC","LDPE", "LLDPE"]:
                 df_clean = process_domestic_inr(filepath, name)
             elif name in ["MEG", "PTA", "Naphtha", "DOP", "PP"]:
                 df_clean = process_usd_mt_products(filepath, name, usd_inr_df)
