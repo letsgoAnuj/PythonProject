@@ -8,7 +8,8 @@ env/
 
 # Data & Outputs (Keeps repo lightweight)
 polymer_data/
-analysis_output/
+analysis_output/*
+!analysis_output/Master_Trend_Data.xlsx
 *.log
 
 # Python Cache
