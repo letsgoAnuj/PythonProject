@@ -14,6 +14,9 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from playwright.sync_api import sync_playwright
+import sys
+# Force UTF-8 encoding for Windows console to support emojis (✓, ❌)
+sys.stdout.reconfigure(encoding='utf-8')
 # Load credentials from a secure .env file
 load_dotenv()
 USERNAME = os.getenv("POLYMER_USERNAME")
@@ -28,11 +31,16 @@ if not os.path.exists(DOWNLOAD_DIR):
 chrome_options = webdriver.ChromeOptions()
 prefs = {
     "download.default_directory": DOWNLOAD_DIR,
-    "download.prompt_for_download": False,
+    "download.prompt_for_download":False,
     "directory_upgrade": True,
     "safebrowsing.enabled": True
 }
 chrome_options.add_experimental_option("prefs", prefs)
+
+# # --- ENABLE INVISIBLE HEADLESS MODE ---
+chrome_options.add_argument("--headless=new") # The 'new' flag ensures downloads work invisibly
+chrome_options.add_argument("--disable-gpu")
+chrome_options.add_argument("--window-size=1920,1080") # Prevents responsive UI collapse
 
 
 # chrome_options.add_argument("--headless") # Uncomment to run invisibly
@@ -544,6 +552,45 @@ def download_rbi_data(driver, download_dir, currency="USD"):
         print(f"Saved crash screenshot to {screenshot_path}")
     print("-" * 40)
 
+
+def download_brent_yfinance(download_dir):
+    """Downloads Brent Crude 1-year historical data reliably using the yfinance library."""
+    import yfinance as yf
+
+    print("\n========================================")
+    print("Downloading Brent Crude from Yahoo Finance (BZ=F)")
+    print("========================================")
+
+    target_filename = "Brent_last_1_year_trend.xlsx"
+    target_path = os.path.join(download_dir, target_filename)
+
+    if os.path.exists(target_path):
+        os.remove(target_path)
+
+    try:
+        # Fetch 1 year of historical data for Brent Crude futures (BZ=F)
+        brent_ticker = yf.Ticker("BZ=F")
+        df = brent_ticker.history(period="1y")
+
+        if not df.empty:
+            # yfinance makes Date the index, so we reset it to a column
+            df = df.reset_index()
+
+            # Standardize columns to match our data_processor.py expectations
+            df = df[['Date', 'Close']].rename(columns={'Close': 'Price'})
+
+            # CRITICAL: Remove timezone awareness from the Date column so Excel can save it properly
+            df['Date'] = df['Date'].dt.tz_localize(None)
+
+            # Save to Excel
+            df.to_excel(target_path, index=False)
+            print(f"✅ Success: Downloaded {len(df)} days of Brent Crude data and saved as '{target_filename}'")
+        else:
+            print("❌ Error: yfinance returned an empty dataset.")
+
+    except Exception as e:
+        print(f"❌ Failed to download yfinance Brent data: {e}")
+
 def download_html_table_data(driver, url, name, download_dir):
     """Scrapes raw HTML tables for sites without direct export buttons."""
     print(f"Navigating to {name}...")
@@ -615,13 +662,6 @@ if __name__ == "__main__":
             "text": "Suspension Delhi",
             "period": "365"
         },
-        "Brent": {
-            "url": "https://polymerupdate.com/Prices/SouthAsia/Crude/DatedBrent",
-            "guid": None,
-            "is_direct": True,
-            "text": "Brent",
-            "period": "365"
-        },
         "EVA": {
             "url": "https://polymerupdate.com/Prices/SouthAsia/OpenMarket/India/Delhi",
             "guid": None,
@@ -684,26 +724,27 @@ if __name__ == "__main__":
     html_table_urls = {
         "BRASS": "https://www.westmetall.com/en/markdaten.php?action=table&field=MB_MS_58_1",
         "ZINC": "https://www.westmetall.com/en/markdaten.php?action=table&field=LME_Zn_cash",
-        "LATEX": "https://en.pcklimited.in/Latex_isi"
-    }
+        "LATEX": "https://en.pcklimited.in/Latex_isi",
+   }
 
     driver = setup_driver()
     try:
         # --- 1. RUN POLYMERUPDATE DATA ---
         login(driver)
         download_data(driver, PRODUCT_CONFIGS, DOWNLOAD_DIR)
-
-        # --- 2. RUN RBI DATA ---
+        #
+        # # --- 2. RUN RBI DATA ---
         download_rbi_data(driver, DOWNLOAD_DIR, currency="USD")
         download_rbi_data(driver, DOWNLOAD_DIR, currency="EUR")
 
         # --- 3. RUN HTML TABLE SCRAPING (Westmetall & Latex) ---
         for name, url in html_table_urls.items():
-            download_html_table_data(driver, url, name, DOWNLOAD_DIR)
+             download_html_table_data(driver, url, name, DOWNLOAD_DIR)
 
         # --- 4. RUN CNY-INR HISTORY (New Addition) ---
         download_cny_inr_history(DOWNLOAD_DIR)
-
+        # --- 4. RUN YAHOO FINANCE API (Brent Crude) ---
+        download_brent_yfinance(DOWNLOAD_DIR)
         print("All downloads initiated. Waiting for active downloads to finish...")
         time.sleep(10)  # Final wait to ensure last file finishes saving
 

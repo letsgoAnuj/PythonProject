@@ -15,7 +15,7 @@ EXCEL_REPORT = os.path.join(ANALYSIS_DIR, "Master_Trend_Data.xlsx")
 LOG_FILE = os.path.join(PROJECT_DIR, "pipeline.log")
 
 # Email Config
-EMAIL_RECEIVERS = ["manager1@campusshoes.com", "team@campusshoes.com"]
+EMAIL_RECEIVERS = ["shubham.gupta@campusshoes.com", "moksh.singh@campusshoes.com"]
 # Dashboard hosted on your local machine
 DASHBOARD_URL = "http://192.168.3.217:8501"
 
@@ -99,35 +99,59 @@ if __name__ == "__main__":
 
     # 2. Build HTML Body
     current_date = datetime.now().strftime("%d-%b-%Y")
+    # 2. Build HTML Body
+    current_date = datetime.now().strftime("%d-%b-%Y")
     email_html = f"""
-    <html>
-    <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-        <h3 style="color: #0052cc;">Footwear Raw Material Market Analytics ({current_date})</h3>
-        <p>Hello Team,</p>
-        <p>The automated weekly raw material analysis has successfully completed. All upstream commodity drivers (Petrochemicals, LME Metals, Rubber) and macro exchange rates (USD, EUR, CNY) have been extracted, mapped to our component categories, and normalized to <b>INR/KG</b>.</p>
+        <html>
+        <body style="font-family: 'Segoe UI', Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #333333; margin: 0; padding: 10px;">
 
-        <div style="margin: 20px 0; padding: 15px; background-color: #f8fafc; border-left: 5px solid #0052cc; border-radius: 4px;">
-            <b style="color: #0052cc;">Live Interactive Dashboard:</b><br>
-            You can access the live market tracking dashboard via our internal network here:<br>
-            <a href="{DASHBOARD_URL}" style="display: inline-block; margin-top: 10px; padding: 10px 18px; background-color: #0052cc; color: #ffffff; text-decoration: none; border-radius: 4px; font-weight: bold;">
-                Open Web Dashboard ↗
-            </a>
-            <br><br>
-            <span style="font-size: 12px; color: #64748b;">(Note: You must be connected to the office network/VPN to access this link.)</span>
-        </div>
+            <h2 style="color: #0f172a; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; margin-bottom: 20px; font-size: 18px;">
+                Footwear Raw Material Market Analytics <span style="color: #64748b; font-size: 16px;">({current_date})</span>
+            </h2>
 
-        <p><b>Attached Deliverables:</b></p>
-        <ul>
-            <li><b>Footwear_Procurement_Forecast.pdf</b>: Executive summary & 1-year monthly trend slides.</li>
-            <li><b>Footwear_Procurement_Forecast.pptx</b>: Editable slide deck for management presentations.</li>
-            <li><b>Master_Trend_Data.xlsx</b>: Clean dataset featuring the interactive UI navigation menu, conversion formulas, and full currency coverage.</li>
-        </ul>
+            <p>Dear Shubham and Moksh,</p>
 
-        <p style="font-size: 12px; color: #64748b; margin-top: 30px;"><i>Generated automatically via Python Procurement Pipeline.</i></p>
-    </body>
-    </html>
-    """
+            <p>The automated weekly raw material analysis has successfully completed. All upstream commodity drivers (Petrochemicals, LME Metals, Rubber) and macro exchange rates (USD, EUR, CNY) have been extracted, mapped to our component categories, and normalized to <strong>INR/KG</strong>.</p>
 
+            <!-- Outlook-Safe Highlight Box & Button -->
+            <table width="100%" cellpadding="0" cellspacing="0" style="margin: 25px 0;">
+                <tr>
+                    <td style="background-color: #f8fafc; border-left: 4px solid #0052cc; padding: 18px; font-family: 'Segoe UI', Arial, sans-serif; font-size: 14px; color: #333333;">
+                        <strong style="color: #0052cc; font-size: 15px;">📊 Live Interactive Dashboard</strong><br>
+                        <div style="margin-top: 5px; margin-bottom: 15px;">Access the live market tracking dashboard via our internal network here:</div>
+
+                        <table cellpadding="0" cellspacing="0">
+                            <tr>
+                                <td align="center" bgcolor="#0052cc" style="border-radius: 4px;">
+                                    <a href="{DASHBOARD_URL}" style="display: block; padding: 10px 22px; color: #ffffff; text-decoration: none; font-weight: bold; font-family: 'Segoe UI', Arial, sans-serif;">Open Web Dashboard ↗</a>
+                                </td>
+                            </tr>
+                        </table>
+
+                        <div style="margin-top: 15px; font-size: 12px; color: #64748b;">
+                            <em>(Note: You must be connected to the office network/VPN to access this link.)</em>
+                        </div>
+                    </td>
+                </tr>
+            </table>
+
+            <p><strong style="color: #0f172a;">Attached Deliverables:</strong></p>
+            <ul style="margin-top: 5px; padding-left: 20px;">
+                <li style="margin-bottom: 8px;"><strong>Footwear_Procurement_Forecast.pdf</strong>: Executive summary & 1-year monthly trend slides.</li>
+                <li style="margin-bottom: 8px;"><strong>Footwear_Procurement_Forecast.pptx</strong>: Editable slide deck for management presentations.</li>
+                <li style="margin-bottom: 8px;"><strong>Master_Trend_Data.xlsx</strong>: Clean dataset featuring the interactive UI navigation menu, conversion formulas, and full currency coverage.</li>
+            </ul>
+
+            <p style="margin-top: 30px;">Best regards,<br>
+            <strong>Automated Procurement Pipeline</strong></p>
+
+            <hr style="border: none; border-top: 1px solid #e2e8f0; margin-top: 30px; margin-bottom: 15px;">
+            <p style="font-size: 11px; color: #94a3b8; margin: 0; font-style: italic;">
+                Generated automatically via Python Procurement Pipeline.
+            </p>
+        </body>
+        </html>
+        """
     # 3. Compile File List to Attach
     target_attachments = [
         PDF_REPORT,

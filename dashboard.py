@@ -3,6 +3,8 @@ import pandas as pd
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 import os
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
 
 # ==========================================
 # PAGE SETUP & BRANDING
@@ -39,7 +41,10 @@ st.caption("1-Year Monthly Procurement Forecast & Trend Dashboard | Master Pipel
 # ==========================================
 @st.cache_data(ttl=3600)
 def load_data():
-    file_path = os.path.join(os.getcwd(), "analysis_output", "Master_Trend_Data.xlsx")
+    # Force the script to use its own directory, ignoring OneDrive/Desktop paths
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(BASE_DIR, "analysis_output", "Master_Trend_Data.xlsx")
+
     df = pd.read_excel(file_path, sheet_name="Product_Trends")
     fx = pd.read_excel(file_path, sheet_name="Exchange_Rates")
     df['Date'] = pd.to_datetime(df['Date'])

@@ -4,6 +4,8 @@ import re
 import pandas as pd
 import numpy as np
 import warnings
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
 
 # Suppress openpyxl/pandas default style warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
@@ -169,21 +171,44 @@ def process_latex(filepath):
 
 
 def process_brent_crude(filepath, usd_inr_df):
-    df = pd.read_excel(filepath, skiprows=3)
+    """Processes Brent Crude from yfinance format (Date, Price) and strips timestamps for FX merging."""
+
+    # 1. Read the clean yfinance format
+    try:
+        df = pd.read_excel(filepath)
+        # Fallback just in case an old legacy file is lingering in the folder
+        if 'Date' not in df.columns and 'Price' not in df.columns:
+            df = pd.read_excel(filepath, skiprows=3)
+    except Exception:
+        df = pd.read_excel(filepath, skiprows=3)
+
+    # 2. Extract Date and Strip the Timestamp (00:00:00)
     date_col = next((col for col in df.columns if 'date' in str(col).lower()), df.columns[0])
-    df['Date'] = pd.to_datetime(df[date_col], errors='coerce')
+    # .dt.normalize() forces '2025-10-06 00:00:00' to become '2025-10-06'
+    df['Date'] = pd.to_datetime(df[date_col], errors='coerce').dt.normalize()
+
+    # 3. Extract Price
     raw_price_col = next((c for c in df.columns if any(x in str(c).lower() for x in ['price', 'value', 'assessment'])),
                          df.columns[1])
     df['Clean_USD_BBL_Price'] = df[raw_price_col].apply(clean_polymer_price)
     df = df.dropna(subset=['Date', 'Clean_USD_BBL_Price'])
 
-    fx_rates = usd_inr_df[['Date', 'Price']].rename(columns={'Price': 'USD_Exchange_Rate'})
+    # 4. Guarantee the RBI FX dates are also stripped of timestamps before merging
+    fx_rates = usd_inr_df[['Date', 'Price']].copy()
+    fx_rates['Date'] = pd.to_datetime(fx_rates['Date']).dt.normalize()
+    fx_rates = fx_rates.rename(columns={'Price': 'USD_Exchange_Rate'})
+
+    # 5. Merge Brent with USD-INR Exchange Rates
     df = pd.merge(df, fx_rates, on='Date', how='left')
+
+    # Fill in weekend gaps (since crude trades on weekends but RBI doesn't publish rates)
     df['USD_Exchange_Rate'] = df['USD_Exchange_Rate'].ffill().bfill()
 
+    # 6. Standardize to INR/KG
     df['Final_INR_KG_Price'] = (df['Clean_USD_BBL_Price'] * df['USD_Exchange_Rate']) / 136.4
     df['Product'] = 'Brent'
     df['Conversion_Formula'] = "(Clean_USD_BBL_Price * USD_Exchange_Rate) / 136.4"
+
     return reorder_columns(df).sort_values('Date', ascending=False)
 
 

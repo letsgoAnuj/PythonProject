@@ -10,6 +10,8 @@ import matplotlib.dates as mdates
 from matplotlib.backends.backend_pdf import PdfPages
 import matplotlib.patches as patches
 from datetime import datetime
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
 
 warnings.filterwarnings('ignore')
 
