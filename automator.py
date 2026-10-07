@@ -169,3 +169,18 @@ if __name__ == "__main__":
 
     logging.info("=== PIPELINE EXECUTION COMPLETE ===")
     print("\n🎉 Pipeline complete. Open Outlook to inspect your Drafts folder.")
+    # 5. Automatically Sync Data to Cloud Dashboard (GitHub)
+    print("\nSyncing updated data to Cloud Dashboard...")
+    try:
+        # Run git add, commit, and push automatically
+        subprocess.run(["git", "add", EXCEL_REPORT], check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", f"Automated data sync: {current_date}"], check=True, capture_output=True)
+        subprocess.run(["git", "push"], check=True, capture_output=True)
+        logging.info("Successfully pushed updated Master_Trend_Data.xlsx to GitHub.")
+        print("✓ Cloud Dashboard successfully updated!")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Failed to sync with GitHub: {e.stderr.decode('utf-8')}")
+        print("⚠️ Warning: Failed to sync data to Cloud Dashboard. Check pipeline.log.")
+
+    logging.info("=== PIPELINE EXECUTION COMPLETE ===")
+    print("\n🎉 Pipeline complete. Open Outlook to inspect your Drafts folder.")
