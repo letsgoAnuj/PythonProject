@@ -1,7 +1,9 @@
 import os
 import io
+import re
 import time
 import glob
+import zipfile
 from urllib.parse import urlparse
 import pandas as pd
 from datetime import datetime, timedelta
@@ -15,39 +17,191 @@ from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from playwright.sync_api import sync_playwright
 import sys
-# Force UTF-8 encoding for Windows console to support emojis (✓, ❌)
+
+# Force UTF-8 encoding for Windows console to support emojis
 sys.stdout.reconfigure(encoding='utf-8')
-# Load credentials from a secure .env file
 load_dotenv()
 USERNAME = os.getenv("POLYMER_USERNAME")
 PASSWORD = os.getenv("POLYMER_PASSWORD")
 
-# Define where you want the Excel files to be saved
-DOWNLOAD_DIR = os.path.join(os.getcwd(), "polymer_data")
+PROJECT_DIR = os.getcwd()
+DOWNLOAD_DIR = os.path.join(PROJECT_DIR, "polymer_data")
+ARCHIVE_DIR = os.path.join(PROJECT_DIR, "archive_data")
+
 if not os.path.exists(DOWNLOAD_DIR):
     os.makedirs(DOWNLOAD_DIR)
+if not os.path.exists(ARCHIVE_DIR):
+    os.makedirs(ARCHIVE_DIR)
 
-# Configure Chrome to automatically save downloads to our folder
-chrome_options = webdriver.ChromeOptions()
-prefs = {
-    "download.default_directory": DOWNLOAD_DIR,
-    "download.prompt_for_download":False,
-    "directory_upgrade": True,
-    "safebrowsing.enabled": True
-}
-chrome_options.add_experimental_option("prefs", prefs)
+# Global ledger to track successful extraction
+SUCCESSFUL_DOWNLOADS = []
 
-# # --- ENABLE INVISIBLE HEADLESS MODE ---
-chrome_options.add_argument("--headless=new") # The 'new' flag ensures downloads work invisibly
-chrome_options.add_argument("--disable-gpu")
-chrome_options.add_argument("--window-size=1920,1080") # Prevents responsive UI collapse
-
-
-# chrome_options.add_argument("--headless") # Uncomment to run invisibly
 
 def setup_driver():
-    """Initializes the Chrome WebDriver."""
-    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+    chrome_options = webdriver.ChromeOptions()
+
+    prefs = {
+        "download.default_directory": DOWNLOAD_DIR,
+        "download.prompt_for_download": False,
+        "download.directory_upgrade": True,
+        "safebrowsing.enabled": True,
+        "profile.default_content_settings.popups": 0
+    }
+    chrome_options.add_experimental_option("prefs", prefs)
+
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920,1080")
+
+    # Prevent renderer crashes ("Unable to receive message from renderer")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+
+    # Bypass SSL warnings on en.pcklimited.in so the LATEX table loads
+    chrome_options.add_argument("--ignore-certificate-errors")
+    chrome_options.add_argument("--allow-running-insecure-content")
+    chrome_options.set_capability("acceptInsecureCerts", True)
+
+    chrome_options.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+
+    driver.execute_cdp_cmd('Page.setDownloadBehavior', {
+        'behavior': 'allow',
+        'downloadPath': DOWNLOAD_DIR
+    })
+
+    return driver
+
+
+def clean_environment(download_dir, archive_dir):
+    """CHECKPOINT 1: Archive Slate. Zips all files for backup, but keeps rolling ledgers in the workspace."""
+    print("\n--- Pre-Flight Check: Archiving Workspace ---")
+    stale_files = glob.glob(os.path.join(download_dir, "*.*"))
+
+    # --- CRITICAL FIX: Files that must be backed up, but NOT deleted ---
+    rolling_ledgers = ['LATEX_last_1_year_trend.xlsx']
+
+    # Grab everything to create a complete backup snapshot
+    files_to_zip = [f for f in stale_files if not (f.endswith('.png') or f.endswith('.log'))]
+
+    if not files_to_zip:
+        print("Workspace is already clean.\n")
+        return
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    zip_filename = os.path.join(archive_dir, f"polymer_data_archive_{timestamp}.zip")
+
+    try:
+        # 1. Back up EVERYTHING (including the Latex ledger) into the ZIP
+        with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for f in files_to_zip:
+                zipf.write(f, os.path.basename(f))
+
+        # 2. Delete the temporary files, but KEEP the rolling ledgers active
+        deleted_count = 0
+        for f in files_to_zip:
+            if os.path.basename(f) not in rolling_ledgers:
+                os.remove(f)
+                deleted_count += 1
+
+        print(f"Backed up {len(files_to_zip)} files to {os.path.basename(zip_filename)}.")
+        print(f"Cleared {deleted_count} stale files (Protected ledgers kept safe in workspace).\n")
+
+    except PermissionError as e:
+        print(f"CRITICAL ERROR: Cannot archive {os.path.basename(e.filename)}. The file is locked.")
+        sys.exit(1)
+    except Exception as e:
+        print(f"CRITICAL ERROR during archiving: {e}")
+        sys.exit(1)
+
+
+def download_rubber_board_india(driver, download_dir):
+    print("\n========================================")
+    print("Downloading Rubber Board of India (Latex) Prices...")
+
+    url = "http://rubberboard.org.in/public"
+    target_path = os.path.join(download_dir, "LATEX_last_1_year_trend.xlsx")
+
+    for attempt in range(3):
+        try:
+            driver.get(url)
+
+            try:
+                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "table")))
+            except Exception:
+                pass
+
+            time.sleep(3)
+            tables = pd.read_html(io.StringIO(driver.page_source))
+
+            target_table = None
+            for df in tables:
+                if 'latex' in df.to_string().lower():
+                    target_table = df
+                    break
+
+            if target_table is None:
+                raise Exception("Could not find the price table on Rubber Board website.")
+
+            latex_price_100kg = None
+            for index, row in target_table.iterrows():
+                row_text = str(row.values).lower()
+                if 'latex' in row_text:
+                    numbers = re.findall(r'\d+(?:\.\d+)?', str(row.values))
+                    valid_nums = [float(n) for n in numbers if float(n) > 100]
+                    if valid_nums:
+                        latex_price_100kg = valid_nums[0]
+                        break
+
+            if not latex_price_100kg:
+                raise Exception("Found table, but could not parse the Latex price digits.")
+
+            # --- CRITICAL FIX: CONVERT INR/100KG TO INR/KG ---
+            # Divide by 100 and round to 2 decimal places to match the PCK format perfectly
+            latex_price_kg = round(latex_price_100kg / 100, 2)
+
+            today_date = datetime.now().strftime("%d %b %Y")
+            new_data = pd.DataFrame([{
+                "Date": today_date,
+                "Full Advance Payment / Wet Kg Without Barrels (Supply in Tanker)": latex_price_kg
+            }])
+
+            if os.path.exists(target_path):
+                try:
+                    existing_df = pd.read_excel(target_path)
+                    existing_df = existing_df[existing_df['Date'].astype(str) != today_date]
+                    final_df = pd.concat([new_data, existing_df], ignore_index=True)
+                except Exception as e:
+                    print(f"  ℹ️ Could not merge with old PCK file ({e}). Starting fresh ledger.")
+                    final_df = new_data
+            else:
+                final_df = new_data
+
+            final_df.to_excel(target_path, index=False)
+
+            if validate_file(target_path):
+                print(f"✅ Success: Downloaded Rubber Board (Today's Latex Price: ₹{latex_price_kg}/KG)")
+                SUCCESSFUL_DOWNLOADS.append("LATEX")
+                return
+
+        except Exception as e:
+            print(f"⚠️ Rubber Board Attempt {attempt + 1} failed: {e}")
+            time.sleep(3 * (attempt + 1))
+
+    print("❌ FAILED: Rubber Board extraction.")
+
+
+def validate_file(filepath):
+    """CHECKPOINT 2: File Size Validation. Catches empty 0KB ghost files."""
+    if not os.path.exists(filepath):
+        return False
+    if os.path.getsize(filepath) < 1024:
+        os.remove(filepath)
+        return False
+    return True
 
 
 def login(driver):
@@ -55,100 +209,39 @@ def login(driver):
     print("Navigating to login page...")
     driver.get("https://www.polymerupdate.com/Account/Login")
 
-    # 1. HANDLE COOKIE BANNER FIRST
     try:
-        print("Checking for cookie banner...")
         cookie_xpath = "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'accept')]"
-        cookie_btn = WebDriverWait(driver, 5).until(
-            EC.element_to_be_clickable((By.XPATH, cookie_xpath))
-        )
+        cookie_btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, cookie_xpath)))
         cookie_btn.click()
-        print("Cookie banner dismissed.")
-        time.sleep(2)  # Give the page 2 seconds to settle after the banner closes
+        time.sleep(2)
     except Exception:
-        print("No cookie banner detected, proceeding...")
-        # Take a picture of the invisible browser to see what went wrong
-        screenshot_path = os.path.join(DOWNLOAD_DIR, "error_screenshot_RBI.png")
-        driver.save_screenshot(screenshot_path)
-        print(f"Saved crash screenshot to {screenshot_path}")
+        pass
 
-    # 2. LOCATE AND FILL FIELDS AFTER THE BANNER IS GONE
     try:
-        # UPDATE THESE IDs IF NECESSARY (e.g., By.NAME, "user_password", etc.)
         user_field = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.ID, "Security_Authentication_UserName"))
-        )
+            EC.presence_of_element_located((By.ID, "Security_Authentication_UserName")))
         pass_field = driver.find_element(By.ID, "currentpassword")
-
         user_field.send_keys(USERNAME)
         pass_field.send_keys(PASSWORD)
 
-        # 3. LOCATE AND CLICK THE SUBMIT BUTTON
         login_btn = driver.find_element(By.XPATH, "//button[text()='Submit']")
-
-        # Scroll and force click to avoid "interactable" errors
         driver.execute_script("arguments[0].scrollIntoView(true);", login_btn)
         time.sleep(1)
         driver.execute_script("arguments[0].click();", login_btn)
 
-        # 4. WAIT FOR DASHBOARD TO LOAD
-        WebDriverWait(driver, 15).until(
-            EC.url_changes("https://www.polymerupdate.com/Account/Login")
-        )
+        WebDriverWait(driver, 15).until(EC.url_changes("https://www.polymerupdate.com/Account/Login"))
         print("Login successful.")
-
     except Exception as e:
-        print(f"Login failed: {e}")
-        # Take a picture of the invisible browser to see what went wrong
-        screenshot_path = os.path.join(DOWNLOAD_DIR, "error_screenshot_RBI.png")
-        driver.save_screenshot(screenshot_path)
-        print(f"Saved crash screenshot to {screenshot_path}")
-        driver.quit()
-        exit()
-
-
-# ==============================================================================
-# CONFIGURATION REPOSITORY
-# Add or update links and selectors here as you inspect each page.
-# Each entry supports:
-#   - 'url': The target URL (with #hash if applicable)
-#   - 'guid': The exact <option value="..."> (preferred). Set to None if using text.
-#   - 'text': Visible text to match if GUID is not yet known.
-#   - 'period': Value for PeriodList (defaults to "365" for 1-year history)
-# ==============================================================================
-
-
-import os
-import time
-import re
-from urllib.parse import urlparse
-from playwright.sync_api import sync_playwright
+        print(f"CRITICAL: Login failed: {e}")
+        sys.exit(1)
 
 
 def download_data(driver, product_configs, download_dir):
-    """
-    Hybrid Playwright Downloader.
-    Resolves:
-      1. ASP.NET single-form scope collapse via tight card-level ancestor isolation.
-      2. Substring collisions via exact option text/GUID matching.
-      3. Unfired AJAX triggers via explicit change event dispatch.
-      4. Inactive tab masking and server-side 500 failure detection.
-      5. Hidden HTML characters (non-breaking spaces) via aggressive Regex stripping.
-      6. Direct Page downloads (bypassing dropdowns entirely).
-    """
+    """Playwright Downloader with CHECKPOINT 3: Exponential Backoff."""
     print("\n--- Transferring Login Session to Playwright ---")
-
-    # 1. Extract cookies from the authenticated Selenium session
     selenium_cookies = driver.get_cookies()
-    playwright_cookies = [
-        {
-            "name": cookie["name"],
-            "value": cookie["value"],
-            "domain": cookie["domain"],
-            "path": cookie["path"]
-        }
-        for cookie in selenium_cookies
-    ]
+    playwright_cookies = [{"name": c["name"], "value": c["value"], "domain": c["domain"], "path": c["path"]} for c in
+                          selenium_cookies]
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -157,612 +250,494 @@ def download_data(driver, product_configs, download_dir):
         page = context.new_page()
 
         for name, cfg in product_configs.items():
-            if isinstance(cfg, str):
-                url = cfg
-                guid = None
-                target_text = name
-                period_val = "365"
-                is_direct = False
-                partial_match = False
-            else:
-                url = cfg["url"]
-                guid = cfg.get("guid")
-                target_text = cfg.get("text", name)
-                period_val = cfg.get("period", "365")
-                is_direct = cfg.get("is_direct", False)
-                partial_match = cfg.get("partial_match", False)
+            success = False
+            target_filename = f"{name}_last_1_year_trend.xlsx"
+            target_path = os.path.join(download_dir, target_filename)
 
-            print(f"\n========================================")
-            print(f"[Playwright] Navigating to {name}: {url}")
-            print(f"========================================")
+            for attempt in range(3):
+                try:
+                    url = cfg if isinstance(cfg, str) else cfg["url"]
+                    guid = None if isinstance(cfg, str) else cfg.get("guid")
+                    target_text = name if isinstance(cfg, str) else cfg.get("text", name)
+                    period_val = "365" if isinstance(cfg, str) else cfg.get("period", "365")
+                    is_direct = False if isinstance(cfg, str) else cfg.get("is_direct", False)
+                    partial_match = False if isinstance(cfg, str) else cfg.get("partial_match", False)
 
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                time.sleep(2)
+                    print(f"\n[Playwright] {name} | Attempt {attempt + 1}/3 | {url}")
+                    page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                    time.sleep(2)
 
-                # Pre-check: Detect server-side crash pages (like Brent 500 error)
-                if page.locator("text='Unfortunately, something went wrong on the page'").count() > 0:
-                    raise Exception("PolymerUpdate server returned an internal error page.")
+                    if page.locator("text='Unfortunately, something went wrong on the page'").count() > 0:
+                        raise Exception("PolymerUpdate server returned 500 error.")
 
-                # Handle internal tab selection (#polymers, #feedstock, etc.)
-                tab_id = urlparse(url).fragment
-                if tab_id:
-                    tab_trigger = page.locator(
-                        f"a[href*='#{tab_id}'], button[data-bs-target*='{tab_id}'], [id='{tab_id}']").first
-                    if tab_trigger.count() > 0 and tab_trigger.is_visible():
-                        tab_trigger.click()
-                        time.sleep(1.5)
+                    tab_id = urlparse(url).fragment
+                    if tab_id:
+                        tab_trigger = page.locator(
+                            f"a[href*='#{tab_id}'], button[data-bs-target*='{tab_id}'], [id='{tab_id}']").first
+                        if tab_trigger.count() > 0 and tab_trigger.is_visible():
+                            tab_trigger.click()
+                            time.sleep(1.5)
 
-                # Force scroll to load lazy-rendered bottom tables
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(1.5)
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
+                    time.sleep(1.5)
 
-                target_filename = f"{name}_last_1_year_trend.xlsx"
-                target_path = os.path.join(download_dir, target_filename)
+                    if os.path.exists(target_path):
+                        os.remove(target_path)
 
-                if os.path.exists(target_path):
-                    os.remove(target_path)
+                    download_buttons = page.get_by_role("button", name="Download Historical Data")
+                    if download_buttons.count() == 0:
+                        download_buttons = page.locator("button, a, input[type='submit']").filter(
+                            has_text="Download Historical Data")
 
-                # ========================================================
-                # ISOLATE TARGET CARD & AVOID GLOBAL ASP.NET FORM TRAP
-                # ========================================================
-                download_buttons = page.get_by_role("button", name="Download Historical Data")
-                if download_buttons.count() == 0:
-                    download_buttons = page.locator("button, a, input[type='submit']").filter(
-                        has_text="Download Historical Data")
+                    target_container = None
+                    target_btn = None
+                    target_select = None
+                    selected_option_val = None
 
-                target_container = None
-                target_btn = None
-                target_select = None
-                selected_option_val = None
+                    for i in range(download_buttons.count()):
+                        btn = download_buttons.nth(i)
+                        if not btn.is_visible(): continue
 
-                for i in range(download_buttons.count()):
-                    btn = download_buttons.nth(i)
-                    if not btn.is_visible():
-                        continue
+                        container = btn.locator(
+                            "xpath=./ancestor::div[contains(@class, 'card') or contains(@class, 'box') or contains(@class, 'table') or contains(@class, 'tab-pane') or .//select][1]")
+                        if container.count() == 0: container = btn.locator("xpath=./..")
 
-                    # Search upwards for the closest local card/box container
-                    container = btn.locator(
-                        "xpath=./ancestor::div[contains(@class, 'card') or contains(@class, 'box') or contains(@class, 'table') or contains(@class, 'tab-pane') or .//select][1]"
-                    )
-                    if container.count() == 0:
-                        container = btn.locator("xpath=./..")
-
-                    # DIRECT MATCH: If it's a direct page (like Brent), bypass dropdown checks entirely
-                    if is_direct:
-                        target_container = container
-                        target_btn = btn
-                        break
-
-                    select_elements = container.locator(
-                        "select[id*='ProductList'], select[name*='GUID'], select[name*='Product']")
-
-                    if select_elements.count() > 0:
-                        candidate_select = select_elements.first
-                        option_handles = candidate_select.locator("option").all()
-                        found = False
-
-                        for opt in option_handles:
-                            val = opt.get_attribute("value") or ""
-
-                            # AGGRESSIVE CLEANING: Strip non-breaking spaces (\xa0), tabs, and trailing spaces
-                            raw_txt = opt.inner_text()
-                            txt = re.sub(r'\s+', ' ', raw_txt).strip()
-
-                            # 1. Exact GUID Match (If explicitly provided)
-                            if guid and val.lower() == guid.lower():
-                                found = True
-                                selected_option_val = val
-                                break
-
-                            # 2. Exact Text Match (Bulletproofed against hidden spaces)
-                            if not guid and target_text.strip().lower() == txt.lower():
-                                found = True
-                                selected_option_val = val
-                                print(f"  -> Text match accepted for '{txt}' (Extracted live GUID: {val})")
-                                break
-
-                            # 3. Partial Text Match (For grades like "EVA 18%")
-                            if not guid and partial_match and target_text.strip().lower() in txt.lower():
-                                found = True
-                                selected_option_val = val
-                                print(f"  -> Partial match accepted: '{txt}' (Extracted live GUID: {val})")
-                                break
-
-                        if found:
-                            target_container = container
-                            target_btn = btn
-                            target_select = candidate_select
+                        if is_direct:
+                            target_container, target_btn = container, btn
                             break
-                    else:
-                        # Fallback for pages without product dropdowns
-                        target_container = container
-                        target_btn = btn
+
+                        select_elements = container.locator(
+                            "select[id*='ProductList'], select[name*='GUID'], select[name*='Product']")
+                        if select_elements.count() > 0:
+                            candidate_select = select_elements.first
+                            for opt in candidate_select.locator("option").all():
+                                val = opt.get_attribute("value") or ""
+                                txt = re.sub(r'\s+', ' ', opt.inner_text()).strip()
+
+                                if guid and val.lower() == guid.lower():
+                                    selected_option_val = val
+                                    break
+                                if not guid and target_text.strip().lower() == txt.lower():
+                                    selected_option_val = val
+                                    break
+                                if not guid and partial_match and target_text.strip().lower() in txt.lower():
+                                    selected_option_val = val
+                                    break
+
+                            if selected_option_val:
+                                target_container, target_btn, target_select = container, btn, candidate_select
+                                break
+                        else:
+                            target_container, target_btn = container, btn
+                            break
+
+                    if not target_btn: raise Exception("No visible download button matched criteria.")
+
+                    target_btn.scroll_into_view_if_needed()
+                    time.sleep(0.5)
+
+                    if target_select and selected_option_val:
+                        target_select.select_option(value=selected_option_val)
+                        target_select.dispatch_event("change")
+                        time.sleep(1)
+
+                    period_loc = target_container.locator("select[id*='PeriodList']")
+                    if period_loc.count() > 0:
+                        period_select = period_loc.first
+                        period_select.select_option(value=str(period_val))
+                        period_select.dispatch_event("change")
+                        time.sleep(1)
+
+                    with page.expect_download(timeout=45000) as download_info:
+                        target_btn.click()
+
+                    download_info.value.save_as(target_path)
+
+                    if validate_file(target_path):
+                        print(f"✅ Success: Saved '{target_filename}'")
+                        SUCCESSFUL_DOWNLOADS.append(name)
+                        success = True
                         break
+                    else:
+                        raise Exception("Downloaded file failed size validation.")
 
-                if not target_btn:
-                    raise Exception(f"No visible download container matched product criteria for '{target_text}'.")
+                except Exception as e:
+                    print(f"⚠️ Error on attempt {attempt + 1}: {e}")
+                    time.sleep(3 * (attempt + 1))  # FIXED: Restored asterisk
 
-                # Scroll into view
-                target_btn.scroll_into_view_if_needed()
-                time.sleep(0.5)
+            if not success:
+                print(f"❌ FAILED: Could not process {name} after 3 attempts.")
 
-                # ========================================================
-                # SELECT OPTIONS & DISPATCH AJAX EVENTS
-                # ========================================================
-                if target_select and selected_option_val:
-                    target_select.select_option(value=selected_option_val)
-                    target_select.dispatch_event("change")
-                    print(f"✓ Selected product option (Value: {selected_option_val}) and dispatched change event.")
-                    time.sleep(1)
-
-                period_loc = target_container.locator("select[id*='PeriodList']")
-                if period_loc.count() > 0:
-                    period_select = period_loc.first
-                    period_select.select_option(value=str(period_val))
-                    period_select.dispatch_event("change")
-                    print(f"✓ Time Period set to {period_val} days.")
-                    time.sleep(1)
-
-                # ========================================================
-                # EXECUTE DOWNLOAD & DIRECT SAVE
-                # ========================================================
-                with page.expect_download(timeout=45000) as download_info:
-                    target_btn.click()
-
-                download = download_info.value
-                download.save_as(target_path)
-                print(f"✅ Success: Downloaded and saved as '{target_filename}'")
-
-            except Exception as e:
-                print(f"❌ Failed to process {name}: {e}")
-                screenshot_path = os.path.join(download_dir, f"error_{name}_playwright.png")
-                page.screenshot(path=screenshot_path)
-                print(f"Saved crash screenshot to {screenshot_path}")
-
-        print("\n--- Playwright downloads complete. Returning control to Selenium ---")
         context.close()
         browser.close()
 
 
 def download_cny_inr_history(download_dir):
-    """
-    Scrapes the full current year's CNY-INR exchange rate history table
-    from exchangerates.org.uk by navigating directly to the year's archive page.
-    """
-    import pandas as pd
-    import io
-    from datetime import datetime
-
+    """Bypasses Cloudflare by using the open-source Frankfurter Exchange Rate API."""
+    import requests
     print("\n========================================")
-    print("[Playwright] Navigating to CNY-INR History")
-    print("========================================")
+    print("Downloading CNY-INR History (Frankfurter API)...")
+    target_path = os.path.join(download_dir, "CNY-INR_last_1_year_trend.xlsx")
 
-    current_year = str(datetime.now().year)
+    for attempt in range(3):
+        try:
+            # Query the last 365 days of data
+            start_date = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+            url = f"https://api.frankfurter.dev/v1/{start_date}..?base=CNY&symbols=INR"
 
-    # 1. BYPASS DROPDOWN: Navigate directly to the dedicated yearly archive URL
-    url = f"https://www.exchangerates.org.uk/CNY-INR-spot-exchange-rates-history-{current_year}.html"
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
 
-    target_filename = "CNY-INR_last_1_year_trend.xlsx"
-    target_path = os.path.join(download_dir, target_filename)
+            if 'rates' in data and data['rates']:
+                records = []
+                for date_str, rate_data in data['rates'].items():
+                    if 'INR' in rate_data:
+                        records.append({'Date': date_str, 'Close': rate_data['INR']})
 
-    try:
-        if os.path.exists(target_path):
-            os.remove(target_path)
+                df = pd.DataFrame(records)
+                df['Date'] = pd.to_datetime(df['Date'])
 
-        with sync_playwright() as p:
-            # Launch browser with a standard User-Agent to prevent getting blocked
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                # --- CRITICAL FIX 1: Extend range to TODAY and eliminate all NaNs ---
+                df.set_index('Date', inplace=True)
+                full_date_range = pd.date_range(start=df.index.min(), end=datetime.now(), freq='D')
+                df = df.reindex(full_date_range)
 
-            print(f"Fetching full data directly for year: {current_year}...")
-            page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                # Forward-fill weekends, backward-fill missing start dates
+                df['Close'] = df['Close'].ffill().bfill()
 
-            # Wait explicitly for the first table to appear in the DOM
-            page.wait_for_selector("table", timeout=15000)
+                df.reset_index(inplace=True)
+                df.rename(columns={'index': 'Date'}, inplace=True)
 
-            # Extract the raw HTML of the fully updated page
-            html_content = page.content()
+                # Sort descending (newest first) to perfectly match the old scraper
+                df.sort_values(by='Date', ascending=False, inplace=True)
 
-            # 2. EXTRACT ALL HTML TABLES
-            tables = pd.read_html(io.StringIO(html_content))
+                # --- CRITICAL FIX 2: Force DD/MM/YYYY string format ---
+                df['Date'] = df['Date'].dt.strftime('%d/%m/%Y')
 
-            valid_tables = []
+                if os.path.exists(target_path):
+                    os.remove(target_path)
 
-            # 3. FILTER AND STITCH ALL MONTHLY TABLES TOGETHER
-            for df in tables:
-                # Only grab tables that actually contain exchange rate data headers
-                if 'Date' in df.columns and 'Close' in df.columns:
-                    valid_tables.append(df)
+                df.to_excel(target_path, index=False)
 
-            if valid_tables:
-                # Combine all the individual month tables into one master DataFrame
-                history_df = pd.concat(valid_tables, ignore_index=True)
+                if validate_file(target_path):
+                    print(f"✅ Success: Downloaded CNY-INR ({len(df)} contiguous records)")
+                    SUCCESSFUL_DOWNLOADS.append("CNY-INR")
+                    return
+            raise Exception("API returned empty data.")
+        except Exception as e:
+            print(f"⚠️ CNY-INR Attempt {attempt + 1} failed: {e}")
+            time.sleep(3 * (attempt + 1))
 
-                # Clean up any completely empty rows or columns
-                history_df.dropna(how='all', axis=1, inplace=True)
-                history_df.dropna(how='all', axis=0, inplace=True)
-
-                # Save it exactly like your other files
-                history_df.to_excel(target_path, index=False)
-                print(f"✅ Success: Downloaded {len(history_df)} days of data and saved as '{target_filename}'")
-            else:
-                raise Exception(f"No exchange rate data tables found for the year {current_year}.")
-
-            browser.close()
-
-    except Exception as e:
-        print(f"❌ Failed to download CNY-INR data: {e}")
-
+    print("❌ FAILED: CNY-INR extraction.")
 
 def download_rbi_data(driver, download_dir, currency="USD"):
-    """
-    Downloads historical rate from RBI for a specific currency.
-    Usage: download_rbi_data(driver, DOWNLOAD_DIR, currency="USD")
-           download_rbi_data(driver, DOWNLOAD_DIR, currency="EUR")
-    """
-    from selenium.common.exceptions import TimeoutException
-
-    # RBI uses 'EURO' for its HTML IDs and Labels, but we want 'EUR' for our filename
+    print(f"\nDownloading RBI {currency}-INR...")
     target_label = "EURO" if currency == "EUR" else "USD"
     checkbox_id = f"chk{target_label}"
 
-    print(f"\nNavigating to RBI {currency}-INR...")
-    driver.get("https://www.rbi.org.in/scripts/referenceratearchive.aspx")
-    time.sleep(4)
+    # Restored to 5 years
+    new_filepath = os.path.join(download_dir, f"{currency}-INR_last_5_year_trend.xls")
 
-    try:
-        # STEP 1: Select Checkbox dynamically based on currency parameter
+    for attempt in range(3):
         try:
-            # Optionally uncheck USD if we are fetching EUR (since USD is often checked by default)
-            if currency == "EUR":
-                try:
-                    default_usd = driver.find_element(By.ID, "chkUSD")
-                    if default_usd.is_selected():
-                        driver.execute_script("arguments[0].click();", default_usd)
-                except:
-                    pass
+            driver.get("https://www.rbi.org.in/scripts/referenceratearchive.aspx")
+            time.sleep(4)
 
-            target_checkbox = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.ID, checkbox_id))
-            )
-            if not target_checkbox.is_selected():
-                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target_checkbox)
-                time.sleep(0.5)
-                driver.execute_script("arguments[0].click();", target_checkbox)
-                print(f"Selected {currency} currency.")
-            else:
-                print(f"{currency} currency already selected by default.")
-        except Exception:
-            print(f"Trying alternative {target_label} selector (label click)...")
+            # --- STEP 1: Select Currency ---
             try:
+                target_checkbox = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, checkbox_id)))
+                if not target_checkbox.is_selected():
+                    driver.execute_script("arguments[0].click();", target_checkbox)
+            except Exception:
                 target_label_el = driver.find_element(By.XPATH, f"//label[contains(text(), '{target_label}')]")
                 driver.execute_script("arguments[0].click();", target_label_el)
-                print(f"Selected {currency} currency via label.")
-            except Exception as e:
-                print(f"Could not find {target_label} checkbox, proceeding... {e}")
 
-        time.sleep(1)
+            # --- STEP 2: Set Dates (Restored Original 5-Year Range) ---
+            today = datetime.now()
+            from_date_str = (today - timedelta(days=365 * 5)).strftime("%d/%m/%Y")  # FIXED: Restored asterisk
+            to_date_str = today.strftime("%d/%m/%Y")
 
-        # STEP 2: Handle dates dynamically (5 Year Range)
-        print("Applying 5-year date range...")
-        today = datetime.now()
-        five_years_ago = today - timedelta(days=365 * 5)
-
-        # Format dates as DD/MM/YYYY for the RBI system
-        from_date_str = five_years_ago.strftime("%d/%m/%Y")
-        to_date_str = today.strftime("%d/%m/%Y")
-
-        try:
-            from_input = driver.find_element(By.ID, "txtFromDate")
-            to_input = driver.find_element(By.ID, "txtToDate")
-            driver.execute_script(f"arguments[0].value = '{from_date_str}';", from_input)
-            driver.execute_script(f"arguments[0].value = '{to_date_str}';", to_input)
-            print(f"Date range set: {from_date_str} to {to_date_str}")
-        except Exception as e:
-            print(f"Warning: Could not set dates automatically. {e}")
-
-        # STEP 3: Click 'Go' / 'Submit' to refresh the table
-        try:
-            print("Looking for a 'Search' or 'Go' button to load the data...")
-            submit_xpath = "//input[@type='submit' or @value='Go' or @value='Search']"
-            go_btn = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.XPATH, submit_xpath))
-            )
-            driver.execute_script("arguments[0].scrollIntoView(true);", go_btn)
-            time.sleep(1)
-            driver.execute_script("arguments[0].click();", go_btn)
-            time.sleep(5)
-        except Exception:
-            print(
-                "Note: No explicit 'Go' or 'Search' button found. The site may auto-fetch. Proceeding directly to Excel...")
-
-        # Track existing files before we trigger the actual download
-        existing_files = set(glob.glob(os.path.join(download_dir, "*")))
-
-        # STEP 4: Find and click the actual Excel download button
-        print("Looking for Excel download button...")
-        try:
-            excel_xpath = "//*[contains(translate(text(), 'excel', 'EXCEL'), 'EXCEL') or contains(translate(@title, 'excel', 'EXCEL'), 'EXCEL') or contains(translate(@alt, 'excel', 'EXCEL'), 'EXCEL') or contains(translate(@src, 'excel', 'EXCEL'), 'EXCEL') or contains(translate(@src, 'xls', 'XLS'), 'XLS')]"
-            excel_btn = WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.XPATH, excel_xpath))
-            )
-            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", excel_btn)
-            time.sleep(1)
-            driver.execute_script("arguments[0].click();", excel_btn)
-            print("Triggered Excel download.")
-
-            # --- NEW: STEP 4.5 HANDLE BROWSER POP-UPS ---
             try:
-                # Wait up to 3 seconds for a JS confirmation pop-up to appear
-                WebDriverWait(driver, 3).until(EC.alert_is_present())
-                alert = driver.switch_to.alert
-                print(f"Pop-up detected: '{alert.text}'. Accepting...")
-                alert.accept()  # This clicks "OK" or "Yes" on the pop-up
-            except TimeoutException:
-                # If no alert appears after 3 seconds, just ignore and proceed
+                from_input = driver.find_element(By.ID, "txtFromDate")
+                to_input = driver.find_element(By.ID, "txtToDate")
+                driver.execute_script("arguments[0].removeAttribute('readonly');", from_input)
+                driver.execute_script("arguments[0].removeAttribute('readonly');", to_input)
+                driver.execute_script(f"arguments[0].value = '{from_date_str}';", from_input)
+                driver.execute_script(f"arguments[0].value = '{to_date_str}';", to_input)
+            except Exception as e:
+                raise Exception(f"Failed to inject dates: {e}")
+
+            # --- STEP 3: Click Submit ---
+            try:
+                submit_xpath = "//input[@type='submit' or @value='Go' or @value='Search']"
+                go_btn = WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, submit_xpath)))
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", go_btn)
+                time.sleep(1)
+                driver.execute_script("arguments[0].click();", go_btn)
+            except Exception as e:
+                raise Exception(f"Failed to click Submit button: {e}")
+
+            # --- STEP 3.5: Handle RBI Submit Alerts ---
+            try:
+                alert = WebDriverWait(driver, 3).until(EC.alert_is_present())
+                alert_text = alert.text
+                alert.accept()
+                raise Exception(f"RBI Website blocked request with popup: '{alert_text}'")
+            except Exception as e:
+                if "RBI Website blocked" in str(e):
+                    raise e
+
+            time.sleep(5)
+
+            # --- STEP 4: Click Excel Download ---
+            try:
+                existing_files = set(glob.glob(os.path.join(download_dir, "*")))
+                excel_xpath = "//*[contains(translate(text(), 'excel', 'EXCEL'), 'EXCEL') or contains(translate(@src, 'xls', 'XLS'), 'XLS')]"
+                excel_btn = WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.XPATH, excel_xpath)))
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", excel_btn)
+                time.sleep(1)
+                driver.execute_script("arguments[0].click();", excel_btn)
+            except Exception as e:
+                raise Exception(f"Failed to find Excel button: {e}")
+
+            # --- STEP 4.5: Handle Excel Download Confirmation Popup ---
+            try:
+                download_alert = WebDriverWait(driver, 3).until(EC.alert_is_present())
+                download_alert.accept()
+            except Exception:
                 pass
-            # --------------------------------------------
+
+                # --- STEP 5: Wait & Validate ---
+            start_time = time.time()
+            while time.time() - start_time < 30:
+                new_files = set(glob.glob(os.path.join(download_dir, "*"))) - existing_files
+                valid_new_files = [f for f in new_files if not f.endswith('.crdownload') and not f.endswith('.tmp')]
+
+                if valid_new_files:
+                    time.sleep(1.5)
+
+                    if os.path.exists(new_filepath):
+                        os.remove(new_filepath)
+
+                    try:
+                        os.rename(valid_new_files[0], new_filepath)
+                    except (PermissionError, OSError):
+                        time.sleep(2)
+                        os.rename(valid_new_files[0], new_filepath)
+
+                    if validate_file(new_filepath):
+                        print(f"✅ Success: RBI {currency}-INR")
+                        SUCCESSFUL_DOWNLOADS.append(f"{currency}-INR")
+                        return
+                    else:
+                        raise Exception("Downloaded file failed size validation (0KB Ghost File).")
+                time.sleep(1)
+
+            raise Exception("Download timed out waiting for the file to drop into the folder.")
 
         except Exception as e:
-            print(f"Warning: Could not find Excel button. {e}")
-            screenshot_path = os.path.join(DOWNLOAD_DIR, "error_screenshot_RBI.png")
-            driver.save_screenshot(screenshot_path)
-            print(f"Saved crash screenshot to {screenshot_path}")
+            print(f"⚠️ RBI {currency} Attempt {attempt + 1} failed: {e}")
+            time.sleep(3 * (attempt + 1))  # FIXED: Restored asterisk
 
-        # STEP 5: Wait for download and rename
-        downloaded_file = None
-        timeout = 45
-        start_time = time.time()
-
-        print(f"Waiting for {currency} download to complete...")
-        while time.time() - start_time < timeout:
-            current_files = set(glob.glob(os.path.join(download_dir, "*")))
-            new_files = current_files - existing_files
-            valid_new_files = [f for f in new_files if not f.endswith('.crdownload') and not f.endswith('.tmp')]
-
-            if valid_new_files:
-                downloaded_file = valid_new_files[0]
-                # Cleanup duplicates if the server pushed multiple files simultaneously
-                if len(valid_new_files) > 1:
-                    for extra_file in valid_new_files[1:]:
-                        try:
-                            os.remove(extra_file)
-                        except:
-                            pass
-                break
-            time.sleep(1)
-
-        if downloaded_file:
-            # Dynamically name the file based on the currency passed in
-            new_filename = f"{currency}-INR_last_5_year_trend.xls"
-            new_filepath = os.path.join(download_dir, new_filename)
-            if os.path.exists(new_filepath):
-                os.remove(new_filepath)
-            os.rename(downloaded_file, new_filepath)
-            print(f"Success! File saved as: {new_filename}")
-        else:
-            print(f"Error: {currency} Download timed out.")
-
-    except Exception as e:
-        print(f"Failed to process RBI {currency}. Error: {e}")
-        screenshot_path = os.path.join(DOWNLOAD_DIR, "error_screenshot_RBI.png")
-        driver.save_screenshot(screenshot_path)
-        print(f"Saved crash screenshot to {screenshot_path}")
-    print("-" * 40)
+    print(f"❌ FAILED: RBI {currency} extraction.")
 
 
 def download_brent_yfinance(download_dir):
-    """Downloads Brent Crude 1-year historical data reliably using the yfinance library."""
     import yfinance as yf
+    print("\nDownloading Brent Crude (Yahoo Finance)...")
+    target_path = os.path.join(download_dir, "Brent_last_1_year_trend.xlsx")
 
-    print("\n========================================")
-    print("Downloading Brent Crude from Yahoo Finance (BZ=F)")
-    print("========================================")
+    for attempt in range(3):
+        try:
+            df = yf.Ticker("BZ=F").history(period="1y")
+            if not df.empty:
+                df = df.reset_index()[['Date', 'Close']].rename(columns={'Close': 'Price'})
+                df['Date'] = df['Date'].dt.tz_localize(None)
+                df.to_excel(target_path, index=False)
 
-    target_filename = "Brent_last_1_year_trend.xlsx"
-    target_path = os.path.join(download_dir, target_filename)
+                if validate_file(target_path):
+                    print(f"✅ Success: Brent Crude")
+                    SUCCESSFUL_DOWNLOADS.append("Brent")
+                    return
+            raise Exception("Empty dataset returned.")
+        except Exception as e:
+            print(f"⚠️ Brent Attempt {attempt + 1} failed: {e}")
+            time.sleep(3 * (attempt + 1))  # FIXED: Restored asterisk
+    print("❌ FAILED: Brent Crude extraction.")
 
-    if os.path.exists(target_path):
-        os.remove(target_path)
-
-    try:
-        # Fetch 1 year of historical data for Brent Crude futures (BZ=F)
-        brent_ticker = yf.Ticker("BZ=F")
-        df = brent_ticker.history(period="1y")
-
-        if not df.empty:
-            # yfinance makes Date the index, so we reset it to a column
-            df = df.reset_index()
-
-            # Standardize columns to match our data_processor.py expectations
-            df = df[['Date', 'Close']].rename(columns={'Close': 'Price'})
-
-            # CRITICAL: Remove timezone awareness from the Date column so Excel can save it properly
-            df['Date'] = df['Date'].dt.tz_localize(None)
-
-            # Save to Excel
-            df.to_excel(target_path, index=False)
-            print(f"✅ Success: Downloaded {len(df)} days of Brent Crude data and saved as '{target_filename}'")
-        else:
-            print("❌ Error: yfinance returned an empty dataset.")
-
-    except Exception as e:
-        print(f"❌ Failed to download yfinance Brent data: {e}")
 
 def download_html_table_data(driver, url, name, download_dir):
-    """Scrapes raw HTML tables for sites without direct export buttons."""
-    print(f"Navigating to {name}...")
-    driver.get(url)
-    time.sleep(3)  # Give the page a moment to load
+    print(f"\nDownloading HTML Table: {name}...")
+    target_path = os.path.join(download_dir, f"{name}_last_1_year_trend.xlsx")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
 
-    try:
-        # 1. Grab the raw HTML for the current page (Current Year)
-        page_source = driver.page_source
-        tables = pd.read_html(io.StringIO(page_source))
+    for attempt in range(3):
+        try:
+            tables = []
 
-        if not tables:
-            print(f"No table found on {url}")
-            return
-
-        # Pick the largest table on the page
-        target_table = max(tables, key=lambda df: df.shape[0] * df.shape[1])
-
-        # --- NEW: SPECIAL PAGINATION LOGIC FOR WESTMETALL ---
-        if "westmetall.com" in url:
-            prev_year = str(datetime.now().year - 1)  # Automatically calculates previous year
-            print(f"Westmetall site detected. Fetching {prev_year} data for {name} to complete the 1-year trend...")
+            # --- LAYER 1: Try Selenium (with Auto-Recovery if session died after RBI) ---
             try:
-                # Look for the link that contains the previous year's text
-                prev_year_link = WebDriverWait(driver, 5).until(
-                    EC.element_to_be_clickable((By.XPATH, f"//a[contains(text(), '{prev_year}')]"))
-                )
-                driver.execute_script("arguments[0].scrollIntoView(true);", prev_year_link)
-                time.sleep(1)
-                driver.execute_script("arguments[0].click();", prev_year_link)
-                time.sleep(4)  # Wait for the previous year's table to load
+                try:
+                    _ = driver.current_url
+                except Exception:
+                    print("  🔄 Browser session was closed. Restarting Chrome driver...")
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
+                    driver = setup_driver()
+                    globals()['driver'] = driver
 
-                # Scrape the previous year's table
-                page_source_prev = driver.page_source
-                tables_prev = pd.read_html(io.StringIO(page_source_prev))
-                target_table_prev = max(tables_prev, key=lambda df: df.shape[0] * df.shape[1])
+                driver.get(url)
 
-                # Combine the current year and previous year tables into one DataFrame
-                target_table = pd.concat([target_table, target_table_prev], ignore_index=True)
-                print(f"Successfully appended {prev_year} data.")
+                try:
+                    WebDriverWait(driver, 12).until(EC.presence_of_element_located((By.TAG_NAME, "table")))
+                except Exception:
+                    pass
 
-            except Exception as e:
-                print(f"Warning: Could not fetch {prev_year} data for BRASS_ZINC. Error: {e}")
-        # ----------------------------------------------------
+                time.sleep(2)
+                tables = pd.read_html(io.StringIO(driver.page_source))
 
-        # 2. Define the output file name
-        new_filename = f"{name}_last_1_year_trend.xlsx"
-        out_path = os.path.join(download_dir, new_filename)
+                if tables and "westmetall.com" in url:
+                    target_table = max(tables, key=lambda df: df.shape[0] * df.shape[1])
+                    prev_year = str(datetime.now().year - 1)
+                    try:
+                        prev_link = WebDriverWait(driver, 5).until(
+                            EC.element_to_be_clickable((By.XPATH, f"//a[contains(text(), '{prev_year}')]"))
+                        )
+                        driver.execute_script("arguments[0].click();", prev_link)
+                        time.sleep(4)
+                        prev_tables = pd.read_html(io.StringIO(driver.page_source))
+                        if prev_tables:
+                            target_table = pd.concat(
+                                [target_table, max(prev_tables, key=lambda df: df.shape[0] * df.shape[1])],
+                                ignore_index=True
+                            )
+                    except Exception:
+                        pass
+                elif tables:
+                    target_table = max(tables, key=lambda df: df.shape[0] * df.shape[1])
 
-        # 3. Delete existing file if it exists to avoid permission errors
-        if os.path.exists(out_path):
-            os.remove(out_path)
+            except Exception as sel_err:
+                print(f"  ℹ️ Selenium fallback triggered for {name} ({sel_err}). Trying direct HTTP...")
 
-        # 4. Save the combined table to Excel
-        target_table.to_excel(out_path, index=False)
-        print(f"Success! Table saved as: {new_filename}")
+            # --- LAYER 2: Direct HTTP Fallback (Immune to Chrome Crashes & SSL Blocks) ---
+            if not tables:
+                import requests
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-    except Exception as e:
-        print(f"Failed to scrape table for {name}. Error: {e}")
+                resp = requests.get(url, headers=headers, verify=False, timeout=20)
+                resp.raise_for_status()
+                tables = pd.read_html(io.StringIO(resp.text))
+                if not tables:
+                    raise Exception("No tables found in DOM.")
+
+                target_table = max(tables, key=lambda df: df.shape[0] * df.shape[1])
+
+                if "westmetall.com" in url:
+                    prev_year = str(datetime.now().year - 1)
+                    try:
+                        prev_url = f"{url}&year={prev_year}"
+                        prev_resp = requests.get(prev_url, headers=headers, verify=False, timeout=20)
+                        prev_tables = pd.read_html(io.StringIO(prev_resp.text))
+                        if prev_tables:
+                            target_table = pd.concat(
+                                [target_table, max(prev_tables, key=lambda df: df.shape[0] * df.shape[1])],
+                                ignore_index=True
+                            )
+                    except Exception:
+                        pass
+
+            if os.path.exists(target_path):
+                os.remove(target_path)
+
+            target_table.to_excel(target_path, index=False)
+
+            if validate_file(target_path):
+                print(f"✅ Success: {name}")
+                SUCCESSFUL_DOWNLOADS.append(name)
+                return
+            raise Exception("Output file failed validation.")
+
+        except Exception as e:
+            print(f"⚠️ {name} Attempt {attempt + 1} failed: {e}")
+            time.sleep(3 * (attempt + 1))  # FIXED: Restored asterisk
+
+    print(f"❌ FAILED: {name} extraction.")
 
 
 if __name__ == "__main__":
-    # Dictionary of your target URLs
     PRODUCT_CONFIGS = {
-        "PVC_Suspension": {
-            "url": "https://polymerupdate.com/Prices/SouthAsia/Polymers/PVC#polymers",
-            "guid": None,
-            "partial_match": True,
-            "text": "Suspension Delhi",
-            "period": "365"
-        },
-        "EVA": {
-            "url": "https://polymerupdate.com/Prices/SouthAsia/OpenMarket/India/Delhi",
-            "guid": None,
-            "partial_match": True,
-            "text": "EVA",
-            "period": "365"
-        },
-        "PVC": {
-            "url": "https://polymerupdate.com/Prices/SouthAsia/OpenMarket/India/Delhi",
-            "guid": None,
-            "partial_match": True,
-            "text": "PVC",
-            "period": "365"
-        },
-        "Naphtha": {
-            "url": "https://polymerupdate.com/Prices/FEA/Naphtha",
-            "guid": None,
-            "partial_match": True,
-            "text": "Naphtha CFR Far East Asia",
-            "period": "365"
-        },
-        "DOP": {
-            "url": "https://polymerupdate.com/Prices/SEA/Intermediates/DOP",
-            "guid": None,
-            "partial_match": True,
-            "text": "DOP CFR South East Asia",
-            "period": "365"
-        },
-        "ACETONE": {
-            "url": "https://www.polymerupdate.com/Prices/SouthAsia/ChemicalBulk/Bulk",
-            "guid": None,
-            "partial_match": True,
-            "text": "Acetone",
-            "period": "365"
-        },
-        "PTA": {
-            "url": "https://polymerupdate.com/Prices/SEA/Polymers/PET#feedstock",
-            "guid": None,
-            "partial_match": True,
-            "text": "PTA CFR South East Asia",
-            "period": "365"
-        },
-        "MEG": {
-            "url": "https://polymerupdate.com/Prices/SEA/Polymers/PET#feedstock",
-            "guid": None,
-            "partial_match": True,
-            "text": "MEG CFR South East Asia",
-            "period": "365"
-        },
-        "PP": {
-            "url": "https://polymerupdate.com/Prices/SouthAsia/Polymers/PP#polymers",
-            "guid": None,
-            "partial_match": True,
-            "text": "BOPP CIF South Korea",
-            "period": "365"
-        },
-        "LDPE": {
-            "url": "https://www.polymerupdate.com/Prices/SouthAsia/OpenMarket/India/Delhi",
-            "guid": None,
-            "partial_match": True,
-            "text": "LDPE Film",
-            "period": "365"
-        },
-        "LLDPE": {
-            "url": "https://www.polymerupdate.com/Prices/SouthAsia/OpenMarket/India/Delhi",
-            "guid": None,
-            "partial_match": True,
-            "text": "LLDPE Film",
-            "period": "365"
-        }
-
+        "PVC_Suspension": {"url": "https://polymerupdate.com/Prices/SouthAsia/Polymers/PVC#polymers",
+                           "partial_match": True, "text": "Suspension Delhi"},
+        "EVA": {"url": "https://polymerupdate.com/Prices/SouthAsia/OpenMarket/India/Delhi", "partial_match": True,
+                "text": "EVA"},
+        "PVC": {"url": "https://polymerupdate.com/Prices/SouthAsia/OpenMarket/India/Delhi", "partial_match": True,
+                "text": "PVC"},
+        "Naphtha": {"url": "https://polymerupdate.com/Prices/FEA/Naphtha", "partial_match": True,
+                    "text": "Naphtha CFR Far East Asia"},
+        "DOP": {"url": "https://polymerupdate.com/Prices/SEA/Intermediates/DOP", "partial_match": True,
+                "text": "DOP CFR South East Asia"},
+        "ACETONE": {"url": "https://www.polymerupdate.com/Prices/SouthAsia/ChemicalBulk/Bulk", "partial_match": True,
+                    "text": "Acetone"},
+        "PTA": {"url": "https://polymerupdate.com/Prices/SEA/Polymers/PET#feedstock", "partial_match": True,
+                "text": "PTA CFR South East Asia"},
+        "MEG": {"url": "https://polymerupdate.com/Prices/SEA/Polymers/PET#feedstock", "partial_match": True,
+                "text": "MEG CFR South East Asia"},
+        "PP": {"url": "https://polymerupdate.com/Prices/SouthAsia/Polymers/PP#polymers", "partial_match": True,
+               "text": "BOPP CIF South Korea"},
+        "LDPE": {"url": "https://www.polymerupdate.com/Prices/SouthAsia/OpenMarket/India/Delhi", "partial_match": True,
+                 "text": "LDPE Film"},
+        "LLDPE": {"url": "https://www.polymerupdate.com/Prices/SouthAsia/OpenMarket/India/Delhi", "partial_match": True,
+                  "text": "LLDPE Film"}
     }
 
-    # HTML Table Scraping URLs
     html_table_urls = {
         "BRASS": "https://www.westmetall.com/en/markdaten.php?action=table&field=MB_MS_58_1",
         "ZINC": "https://www.westmetall.com/en/markdaten.php?action=table&field=LME_Zn_cash",
-        "LATEX": "https://en.pcklimited.in/Latex_isi",
-   }
+        # "LATEX": "https://en.pcklimited.in/Latex_isi",
+    }
+
+    EXPECTED_PRODUCTS = list(PRODUCT_CONFIGS.keys()) + list(html_table_urls.keys()) + ["USD-INR", "EUR-INR", "CNY-INR",
+                                                                                       "Brent"]
+
+    clean_environment(DOWNLOAD_DIR, ARCHIVE_DIR)
 
     driver = setup_driver()
     try:
-        # --- 1. RUN POLYMERUPDATE DATA ---
         login(driver)
         download_data(driver, PRODUCT_CONFIGS, DOWNLOAD_DIR)
-        #
-        # # --- 2. RUN RBI DATA ---
+
         download_rbi_data(driver, DOWNLOAD_DIR, currency="USD")
         download_rbi_data(driver, DOWNLOAD_DIR, currency="EUR")
 
-        # --- 3. RUN HTML TABLE SCRAPING (Westmetall & Latex) ---
         for name, url in html_table_urls.items():
-             download_html_table_data(driver, url, name, DOWNLOAD_DIR)
+            download_html_table_data(driver, url, name, DOWNLOAD_DIR)
 
-        # --- 4. RUN CNY-INR HISTORY (New Addition) ---
+        # --- NEW CALL ---
+        download_rubber_board_india(driver, DOWNLOAD_DIR)
+
+        # REWRITTEN CALL: Uses the new Yahoo Finance function
         download_cny_inr_history(DOWNLOAD_DIR)
-        # --- 4. RUN YAHOO FINANCE API (Brent Crude) ---
         download_brent_yfinance(DOWNLOAD_DIR)
-        print("All downloads initiated. Waiting for active downloads to finish...")
-        time.sleep(10)  # Final wait to ensure last file finishes saving
+
+        time.sleep(5)
 
     finally:
         driver.quit()
-        print(f"Scraping session closed. Files saved in: {DOWNLOAD_DIR}")
+
+        missing_products = [p for p in EXPECTED_PRODUCTS if p not in SUCCESSFUL_DOWNLOADS]
+        log_path = os.path.join(PROJECT_DIR, "missing_products.log")
+
+        if missing_products:
+            print(f"\n⚠️ WARNING: The following products failed extraction: {missing_products}")
+            with open(log_path, "w") as f:
+                f.write(", ".join(missing_products))
+        else:
+            if os.path.exists(log_path):
+                os.remove(log_path)
+            print("\n✅ 100% Data Extraction Successful.")

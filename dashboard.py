@@ -4,6 +4,7 @@ from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 import os
 import sys
+
 sys.stdout.reconfigure(encoding='utf-8')
 
 # ==========================================
@@ -41,7 +42,6 @@ st.caption("1-Year Monthly Procurement Forecast & Trend Dashboard | Master Pipel
 # ==========================================
 @st.cache_data(ttl=3600)
 def load_data():
-    # Force the script to use its own directory, ignoring OneDrive/Desktop paths
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     file_path = os.path.join(BASE_DIR, "analysis_output", "Master_Trend_Data.xlsx")
 
@@ -72,29 +72,25 @@ view_mode = st.sidebar.radio(
 st.sidebar.markdown("---")
 st.sidebar.subheader("Data Sources")
 st.sidebar.markdown("""
-- **PolymerUpdate**: PVC, EVA, Naphtha, DOP, Acetone, MEG, PTA, PP, Brent
+- **PolymerUpdate**: PVC, EVA, Naphtha, DOP, Acetone, MEG, PTA, PP, Brent, LDPE, LLDPE
 - **RBI**: Reference FX Rates (USD, EUR)
 - **ExchangeRates.org.uk**: CNY/INR History
 - **Westmetall**: LME Zinc & Brass
 - **PCK Ltd**: Natural Rubber / Latex
 """)
 
-# High-contrast corporate colors matching report generator
 CHART_COLORS = ['#0052cc', '#e52d27', '#00b8d9', '#6554c0', '#ff8b00']
 
 
-# Helper to aggregate to monthly if selected
 def prepare_data(data_df, value_col):
     data_df = data_df.copy().sort_values('Date')
     one_year_ago = pd.to_datetime('today') - pd.DateOffset(years=1)
     data_df = data_df[data_df['Date'] >= one_year_ago]
 
-    # Safety check: If no data exists in the last year, return empty immediately
     if data_df.empty:
         return data_df
 
     if view_mode.startswith("1-Year Monthly"):
-        # Explicitly set the Date as the index BEFORE resampling
         monthly = data_df.set_index('Date').resample('MS').mean(numeric_only=True).reset_index()
         monthly = monthly.dropna(subset=[value_col])
         return monthly
@@ -115,8 +111,6 @@ def build_trend_chart(items_config, default_sheet_df, unit_label="INR/KG"):
 
         if not plot_df.empty:
             color = CHART_COLORS[idx % len(CHART_COLORS)]
-
-            # Format text labels with zero decimals
             text_labels = [f"{v:,.0f}" for v in plot_df[val_col]]
 
             fig.add_trace(go.Scatter(
@@ -153,7 +147,6 @@ def build_trend_chart(items_config, default_sheet_df, unit_label="INR/KG"):
     return fig
 
 
-# Metric KPI helper
 def display_kpis(products, default_df, is_fx=False):
     cols = st.columns(len(products))
     for i, prod in enumerate(products):
@@ -166,13 +159,14 @@ def display_kpis(products, default_df, is_fx=False):
             prev = mat_data.iloc[-2][val_col] if len(mat_data) > 1 else latest
             pct_change = ((latest - prev) / prev) * 100 if prev != 0 else 0.0
 
-            unit = "INR" if is_fx else "₹/kg"
+            unit = "INR" if is_fx else ("USD/bbl" if prod == "Brent" else "₹/kg")
+            prefix = "$" if prod == "Brent" else ""
+
             cols[i].metric(
                 label=f"{prod} Current",
-                value=f"{latest:,.2f} {unit}" if is_fx else f"{latest:,.0f} {unit}",
+                value=f"{prefix}{latest:,.2f} {unit}" if is_fx or prod == "Brent" else f"{latest:,.0f} {unit}",
                 delta=f"{pct_change:+.2f}% vs last period" if is_fx else f"{pct_change:+.1f}% vs last period"
             )
-
 
 # ==========================================
 # SLIDE-ALIGNED TAB NAVIGATION
@@ -184,11 +178,12 @@ tabs = st.tabs([
     "📦 Packaging Films",
     "🧽 Precursors (EVA, Acetone, Naphtha)",
     "⚙️ Soles & Hardware (Brass, Latex, Zinc)",
+    "📈 Price Variation Analysis",
     "📄 Master Audit Trail"
 ])
 
 # ------------------------------------------
-# TAB 1: EXCHANGE RATE TRACKER (PAGE 1)
+# TAB 1: EXCHANGE RATE TRACKER
 # ------------------------------------------
 with tabs[0]:
     st.subheader("Global & Regional Exchange Rate Tracker")
@@ -217,7 +212,7 @@ with tabs[0]:
                         use_container_width=True)
 
 # ------------------------------------------
-# TAB 2: ITEM IMPACTING YARN (PAGE 2)
+# TAB 2: ITEM IMPACTING YARN
 # ------------------------------------------
 with tabs[1]:
     st.subheader("Items Impacting Yarn")
@@ -231,16 +226,18 @@ with tabs[1]:
     display_kpis(["PTA", "MEG", "PP", "Brent"], df)
     st.markdown("###")
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.markdown("**PTA & MEG Trajectory**")
         st.plotly_chart(build_trend_chart([{"prod": "PTA"}, {"prod": "MEG"}], df), use_container_width=True)
     with col2:
-        st.markdown("**PP & Brent Crude Trajectory**")
-        st.plotly_chart(build_trend_chart([{"prod": "PP"}, {"prod": "Brent"}], df), use_container_width=True)
-
+        st.markdown("**PP Trajectory**")
+        st.plotly_chart(build_trend_chart([{"prod": "PP"}], df), use_container_width=True)
+    with col3:
+        st.markdown("**Brent Crude Trajectory**")
+        st.plotly_chart(build_trend_chart([{"prod": "Brent"}], df, unit_label="USD/BBL"), use_container_width=True)
 # ------------------------------------------
-# TAB 3: ITEM IMPACTING PVC COATED (PAGE 3)
+# TAB 3: ITEM IMPACTING PVC COATED
 # ------------------------------------------
 with tabs[2]:
     st.subheader("Items Impacting PVC Coated Fabric")
@@ -253,13 +250,11 @@ with tabs[2]:
 
     display_kpis(["PVC_Suspension", "DOP"], df)
     st.markdown("###")
-
     st.plotly_chart(build_trend_chart([{"prod": "DOP"}, {"prod": "PVC_Suspension"}], df), use_container_width=True)
 
 # ------------------------------------------
-# NEW TAB 4: PACKAGING FILMS (LDPE & LLDPE)
+# TAB 4: PACKAGING FILMS (LDPE & LLDPE)
 # ------------------------------------------
-
 with tabs[3]:
     st.subheader("Packaging Films: LDPE & LLDPE")
     st.markdown("""
@@ -271,11 +266,10 @@ with tabs[3]:
 
     display_kpis(["LDPE", "LLDPE"], df)
     st.markdown("###")
-
     st.plotly_chart(build_trend_chart([{"prod": "LDPE"}, {"prod": "LLDPE"}], df), use_container_width=True)
 
 # ------------------------------------------
-# TAB 5: PRECURSORS (EVA, ACETONE, NAPHTHA) (PAGE 4)
+# TAB 5: PRECURSORS
 # ------------------------------------------
 with tabs[4]:
     st.subheader("EVA, Acetone & Naphtha: Market Trend")
@@ -301,7 +295,7 @@ with tabs[4]:
         st.plotly_chart(build_trend_chart([{"prod": "EVA"}], df), use_container_width=True)
 
 # ------------------------------------------
-# TAB 6: SOLES & HARDWARE (BRASS, LATEX, ZINC) (PAGE 5)
+# TAB 6: SOLES & HARDWARE
 # ------------------------------------------
 with tabs[5]:
     st.subheader("Brass, Latex & Zinc: Market Trend")
@@ -327,9 +321,123 @@ with tabs[5]:
         st.plotly_chart(build_trend_chart([{"prod": "ZINC"}], df), use_container_width=True)
 
 # ------------------------------------------
-# TAB 7: AUDIT TRAIL & EXPORT
+# TAB 7: PRICE VARIATION ANALYSIS
 # ------------------------------------------
 with tabs[6]:
+    st.subheader("Historical Price Variation Matrix")
+    st.markdown(
+        "Track percentage changes in raw material costs across standard timeframes. *(Note: Uses the closest available trading day for historical comparison).*")
+
+    all_products = []
+    for prod in df['Product'].unique():
+        all_products.append({'name': prod, 'df': df[df['Product'] == prod], 'val_col': 'Final_INR_KG_Price'})
+    for fx_pair in fx['Product'].unique():
+        all_products.append({'name': fx_pair, 'df': fx[fx['Product'] == fx_pair], 'val_col': 'Price'})
+
+    intervals = {
+        "1 Day": 1, "3 Days": 3, "7 Days": 7, "2 Weeks": 14,
+        "1 Month": 30, "2 Months": 60,
+        "3 Months": 90, "6 Months": 180, "1 Year": 365
+    }
+
+    matrix_rows = []
+    for item in all_products:
+        prod_df = item['df'].sort_values('Date', ascending=False)
+        if prod_df.empty: continue
+
+        latest_row = prod_df.iloc[0]
+        latest_price = latest_row[item['val_col']]
+        latest_date = latest_row['Date']
+
+        row = {"Commodity": item['name'], "Latest Price": latest_price}
+
+        for label, days in intervals.items():
+            target_date = latest_date - pd.Timedelta(days=days)
+            past_df = prod_df[prod_df['Date'] <= target_date]
+
+            if not past_df.empty:
+                past_price = past_df.iloc[0][item['val_col']]
+                pct_change = ((latest_price - past_price) / past_price) * 100
+                row[label] = pct_change
+            else:
+                # 20-day tolerance fallback for 1-Year edge cases
+                oldest_date = prod_df['Date'].min()
+                if (oldest_date - target_date).days <= 20:
+                    past_price = prod_df.iloc[-1][item['val_col']]
+                    pct_change = ((latest_price - past_price) / past_price) * 100
+                    row[label] = pct_change
+                else:
+                    row[label] = None
+
+        matrix_rows.append(row)
+
+    matrix_df = pd.DataFrame(matrix_rows)
+
+
+    def format_pct(val):
+        return "-" if pd.isna(val) else f"{val:+.2f}%"
+
+
+    format_dict = {col: format_pct for col in intervals.keys()}
+    format_dict["Latest Price"] = "₹{:,.2f}"
+
+
+    def color_procurement_risk(val):
+        if isinstance(val, (int, float)) and not pd.isna(val):
+            color = '#e52d27' if val > 0 else '#00875a' if val < 0 else 'black'
+            return f'color: {color}; font-weight: bold;'
+        return ''
+
+
+    styled_matrix = matrix_df.style.format(format_dict).map(
+        color_procurement_risk,
+        subset=list(intervals.keys())
+    )
+
+    st.dataframe(styled_matrix, use_container_width=True, hide_index=True)
+    st.caption(
+        "🔍 **Procurement Insight:** **Red** percentages indicate a raw material cost increase over the period. **Green** percentages indicate favorable cost savings.")
+    st.markdown("---")
+
+    # Custom Date Range Calculator
+    st.subheader("Custom Date Range Calculator")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        sel_prod = st.selectbox("Select Commodity to Analyze:", [p['name'] for p in all_products])
+    with col2:
+        start_date = st.date_input("Start Date (Baseline)", value=pd.to_datetime('today') - pd.Timedelta(days=30))
+    with col3:
+        end_date = st.date_input("End Date (Current)", value=pd.to_datetime('today'))
+
+    if start_date and end_date:
+        target_item = next(p for p in all_products if p['name'] == sel_prod)
+        t_df = target_item['df'].sort_values('Date', ascending=False)
+
+        start_df = t_df[t_df['Date'] <= pd.to_datetime(start_date)]
+        end_df = t_df[t_df['Date'] <= pd.to_datetime(end_date)]
+
+        if not start_df.empty and not end_df.empty:
+            s_price = start_df.iloc[0][target_item['val_col']]
+            s_date_actual = start_df.iloc[0]['Date'].strftime('%d-%b-%Y')
+
+            e_price = end_df.iloc[0][target_item['val_col']]
+            e_date_actual = end_df.iloc[0]['Date'].strftime('%d-%b-%Y')
+
+            custom_pct = ((e_price - s_price) / s_price) * 100
+            curr = "$" if sel_prod == "Brent" else "₹"
+            st.metric(
+                label=f"{sel_prod} Price Shift: {s_date_actual} ➔ {e_date_actual}",
+                value=f"₹{e_price:,.2f}",
+                delta=f"{custom_pct:+.2f}% (from ₹{s_price:,.2f})",
+                delta_color="inverse"
+            )
+        else:
+            st.warning("Insufficient historical data to cover this specific date range.")
+
+# ------------------------------------------
+# TAB 8: AUDIT TRAIL
+# ------------------------------------------
+with tabs[7]:
     st.subheader("Data Audit Trail & Conversion Formulas")
     st.markdown("Full transparency on raw inputs, currency conversions, and calculation formulas.")
 
